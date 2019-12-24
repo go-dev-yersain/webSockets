@@ -12,25 +12,42 @@ import (
 
 type JsonResponse struct {
 	Authorization string `json:"Authorization"`
-	ClientId string `json:"ClientId"`
+	ClientId      string `json:"ClientId"`
 }
 
-var wsConnections map[string]*melody.Session
-
+var wsConnections *WsSessions
+var wg *sync.WaitGroup
 
 func main() {
-	wg := new(sync.WaitGroup)
-	wg.Add(2)
-
-	kafkaMessageCh := make(chan Message)
+	wg = new(sync.WaitGroup)
+	wg.Add(3)
+	kafkaMsgCh := make(chan *Message, 1)
+	wsConnections = NewWsSession()
+	fmt.Println(wsConnections.Size())
 
 	go webSocketListener(wg)
-	go kafkaConsumer(wg)
+	go kafkaConsumer(wg, kafkaMsgCh)
+	go msgDispatcher(kafkaMsgCh)
+	wg.Wait()
 }
 
-func webSocketListener(wg *sync.WaitGroup){
+func msgDispatcher(msgCh <-chan *Message) {
+	for {
+		select {
+		case msg := <-msgCh:
+			clientId := msg.Keys.ClientId
+			val, ok := wsConnections.Load(clientId)
+			if !ok {
+				fmt.Println("Session not found")
+			} else {
+				val.Write([]byte("catch"))
+			}
+		}
+	}
+}
+
+func webSocketListener(wg *sync.WaitGroup) {
 	defer wg.Done()
-	wsConnections = make(map[string]*melody.Session)
 	r := gin.Default()
 	m := melody.New()
 
@@ -45,22 +62,18 @@ func webSocketListener(wg *sync.WaitGroup){
 	m.HandleMessage(func(s *melody.Session, msg []byte) {
 		m := new(JsonResponse)
 		json.Unmarshal(msg, m)
-		wsConnections[m.ClientId] = s
-		fmt.Println(m, wsConnections)
+		wsConnections.Store(m.ClientId, s)
+		fmt.Println(wsConnections.Size())
 	})
 
-
-	m.HandleConnect(func(s *melody.Session){
+	m.HandleConnect(func(s *melody.Session) {
 
 	})
-
-
 
 	r.Run(":5000")
-
 }
 
-func kafkaConsumer(wg *sync.WaitGroup) {
+func kafkaConsumer(wg *sync.WaitGroup, msgCh chan<- *Message) {
 	defer wg.Done()
 	c, err := kafka.NewConsumer(&kafka.ConfigMap{
 		"bootstrap.servers": "localhost:9092",
@@ -79,8 +92,13 @@ func kafkaConsumer(wg *sync.WaitGroup) {
 	for {
 		msg, err := c.ReadMessage(-1)
 		if err == nil {
-			m := Message{}
-			json.Unmarshal(msg.Value, &m)
+			m := new(Message)
+			err := json.Unmarshal(msg.Value, &m)
+			if err != nil {
+				fmt.Println(err)
+			} else {
+				msgCh <- m
+			}
 			fmt.Println(m)
 		} else {
 			// The client will automatically try to recover from all errors.
@@ -101,15 +119,10 @@ type Message struct {
 	} `json:"keys"`
 }
 
-//type keys struct{
-//	processId string `json:"processId"`
-//	publicId string `json:"publicId"`
-//	clientId string `json:"clientId"`
-//	token string 	`json:"token"`
-//}
-//
+
+//{"event":"push","keys":{"process_id":"p1","public_id":"pb1","client_id":"cl2","token":"lkfdnvlkdsjf"}}
+
+
 //{"event":"push","keys":{"process_id":"p1","public_id":"pb1","client_id":"cl1","token":"lkfdnvlkdsjf"}}
 
 //{"id":"numero uno","type":"transaction","data":{"id":"numero uno","type":"transaction","amount":"1000","currency":"usd"}}"`
-
-//{"title":"The Matrix","year":1999,"cast":["Keanu Reeves","Laurence Fishburne","Carrie-Anne Moss","Hugo Weaving","Joe Pantoliano"],"genres":["Science Fiction"]}
